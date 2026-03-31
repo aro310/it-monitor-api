@@ -7,11 +7,11 @@ app = Flask(__name__)
 
 def determiner_etat(cpu, ram, response_time):
     if cpu > 85 or ram > 85 or response_time > 500:
-        return 2  # Critique
+        return 2
     elif cpu > 70 or ram > 70 or response_time > 300:
-        return 1  # Dégradé
+        return 1
     else:
-        return 0  # Normal
+        return 0
 
 @app.route('/analyser', methods=['POST'])
 def analyser():
@@ -40,7 +40,7 @@ def analyser():
         resultats = []
 
         for serveur in df['serveur'].unique():
-            df_srv = df[df['serveur'] == serveur].copy()
+            df_srv = df[df['serveur'] == serveur].copy().reset_index(drop=True)
 
             # 1. Chaîne de Markov
             matrice = np.array([
@@ -49,18 +49,20 @@ def analyser():
                 [0.20, 0.30, 0.50]
             ])
             etat = determiner_etat(
-                df_srv['cpu'].iloc[-1],
-                df_srv['ram'].iloc[-1],
-                df_srv['response_time'].iloc[-1]
+                float(df_srv['cpu'].iloc[-1]),
+                float(df_srv['ram'].iloc[-1]),
+                float(df_srv['response_time'].iloc[-1])
             )
             matrice_2 = np.linalg.matrix_power(matrice, 2)
             prob_panne = round(float(matrice_2[etat][2] * 100), 1)
 
             # 2. Monte Carlo
+            cpu_std = float(df_srv['cpu'].std()) + 0.1
+            cpu_last = float(df_srv['cpu'].iloc[-1])
             simulations = []
             for _ in range(1000):
-                bruit = np.random.normal(0, df_srv['cpu'].std() + 0.1, 24)
-                simulations.append(df_srv['cpu'].iloc[-1] + np.cumsum(bruit))
+                bruit = np.random.normal(0, cpu_std, 24)
+                simulations.append(cpu_last + np.cumsum(bruit))
             simulations = np.array(simulations)
             prob_surcharge = round(
                 float(np.mean(simulations.max(axis=1) > 90) * 100), 1
@@ -69,12 +71,15 @@ def analyser():
             # 3. MTTR
             mttr = round(float(df_srv['resolution_time'].mean()), 2)
 
-            # 4. Z-Score
+            # 4. Z-Score — corrigé
+            anomalie = False
             if len(df_srv) > 2:
-                z = np.abs(stats.zscore(df_srv['response_time']))
-                anomalie = bool(z.iloc[-1] > 2.0)
-            else:
-                anomalie = False
+                valeurs = df_srv['response_time'].values.astype(float)
+                moyenne = np.mean(valeurs)
+                ecart_type = np.std(valeurs)
+                if ecart_type > 0:
+                    z_scores = np.abs((valeurs - moyenne) / ecart_type)
+                    anomalie = bool(z_scores[-1] > 2.0)
 
             # 5. Alerte
             alerte = prob_panne > 30 or prob_surcharge > 50 or anomalie
