@@ -15,62 +15,83 @@ def determiner_etat(cpu, ram, response_time):
 
 @app.route('/analyser', methods=['POST'])
 def analyser():
-    data = request.json
-    df = pd.DataFrame(data)
+    try:
+        data = request.get_json(force=True)
 
-    resultats = []
+        if isinstance(data, str):
+            import json
+            data = json.loads(data)
 
-    for serveur in df['serveur'].unique():
-        df_srv = df[df['serveur'] == serveur].copy()
+        df = pd.DataFrame(data)
 
-        # 1. Chaîne de Markov
-        matrice = np.array([
-            [0.85, 0.12, 0.03],
-            [0.40, 0.45, 0.15],
-            [0.20, 0.30, 0.50]
-        ])
-        etat = determiner_etat(
-            df_srv['cpu'].iloc[-1],
-            df_srv['ram'].iloc[-1],
-            df_srv['response_time'].iloc[-1]
-        )
-        # Probabilité panne après 2 étapes
-        matrice_2 = np.linalg.matrix_power(matrice, 2)
-        prob_panne = round(matrice_2[etat][2] * 100, 1)
+        # Supprimer row_number si elle existe
+        if 'row_number' in df.columns:
+            df = df.drop(columns=['row_number'])
 
-        # 2. Monte Carlo - Probabilité surcharge CPU
-        simulations = []
-        for _ in range(1000):
-            bruit = np.random.normal(0, df_srv['cpu'].std(), 24)
-            simulations.append(df_srv['cpu'].iloc[-1] + np.cumsum(bruit))
-        simulations = np.array(simulations)
-        prob_surcharge = round(
-            float(np.mean(simulations.max(axis=1) > 90) * 100), 1
-        )
+        # Convertir les colonnes numériques
+        cols_numeriques = ['cpu', 'ram', 'disk', 'response_time',
+                          'incidents', 'resolution_time']
+        for col in cols_numeriques:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '.').str.strip()
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(0)
 
-        # 3. MTTR
-        mttr = round(float(df_srv['resolution_time'].mean()), 2)
+        resultats = []
 
-        # 4. Z-Score anomalie
-        if len(df_srv) > 2:
-            z = np.abs(stats.zscore(df_srv['response_time']))
-            anomalie = bool(z.iloc[-1] > 2.0)
-        else:
-            anomalie = False
+        for serveur in df['serveur'].unique():
+            df_srv = df[df['serveur'] == serveur].copy()
 
-        # 5. Alerte
-        alerte = prob_panne > 30 or prob_surcharge > 50 or anomalie
+            # 1. Chaîne de Markov
+            matrice = np.array([
+                [0.85, 0.12, 0.03],
+                [0.40, 0.45, 0.15],
+                [0.20, 0.30, 0.50]
+            ])
+            etat = determiner_etat(
+                df_srv['cpu'].iloc[-1],
+                df_srv['ram'].iloc[-1],
+                df_srv['response_time'].iloc[-1]
+            )
+            matrice_2 = np.linalg.matrix_power(matrice, 2)
+            prob_panne = round(float(matrice_2[etat][2] * 100), 1)
 
-        resultats.append({
-            "serveur": serveur,
-            "prob_panne_48h": prob_panne,
-            "prob_surcharge_cpu": prob_surcharge,
-            "mttr": mttr,
-            "anomalie_detectee": anomalie,
-            "alerte": alerte
-        })
+            # 2. Monte Carlo
+            simulations = []
+            for _ in range(1000):
+                bruit = np.random.normal(0, df_srv['cpu'].std() + 0.1, 24)
+                simulations.append(df_srv['cpu'].iloc[-1] + np.cumsum(bruit))
+            simulations = np.array(simulations)
+            prob_surcharge = round(
+                float(np.mean(simulations.max(axis=1) > 90) * 100), 1
+            )
 
-    return jsonify(resultats)
+            # 3. MTTR
+            mttr = round(float(df_srv['resolution_time'].mean()), 2)
+
+            # 4. Z-Score
+            if len(df_srv) > 2:
+                z = np.abs(stats.zscore(df_srv['response_time']))
+                anomalie = bool(z.iloc[-1] > 2.0)
+            else:
+                anomalie = False
+
+            # 5. Alerte
+            alerte = prob_panne > 30 or prob_surcharge > 50 or anomalie
+
+            resultats.append({
+                "serveur": serveur,
+                "prob_panne_48h": prob_panne,
+                "prob_surcharge_cpu": prob_surcharge,
+                "mttr": mttr,
+                "anomalie_detectee": anomalie,
+                "alerte": alerte
+            })
+
+        return jsonify(resultats)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
